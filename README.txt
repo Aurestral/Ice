@@ -31,9 +31,10 @@ Example: openai/gpt-oss-120b
 
 <Detailed Documentation on all features/commands available in Ice>
 
--> Visit our website.
+-> Read the FEATURES.md file.
 
 <Support>
 
 If you encounter any issues, please reach out to us at:
+
 aurestral@proton.me
