@@ -240,7 +240,7 @@ class RealTerminal(tk.Frame):
     def __init__(self, master, project_dir, root, height=10):
         super().__init__(master, bg="#1e1e1e")
         self.root = root
-        self.project_dir = project_dir
+        self.project_dir = project_dir if project_dir else os.path.expanduser("~")
         self._running = True
 
         # Configure the main frame to expand properly
@@ -591,15 +591,14 @@ class IceIDE:
         self._set_window_icon()
 
         # default project dir
-        self.project_dir = os.path.expanduser("~/IceProjects")
-        os.makedirs(self.project_dir, exist_ok=True)
+        self.project_dir = None
         self.current_file = None
         
         # Language interpreters configuration (will be loaded from config)
         self.interpreters = {
             'python': sys.executable,
             'javascript': 'node',
-            'java': 'java',
+            'java': 'javac',
             'cpp': 'g++',
             'c': 'gcc',
             'rust': 'rustc',
@@ -634,7 +633,7 @@ class IceIDE:
         # REAL terminal with resizable paned window
         self.main_paned.add(self._create_terminal_area(), weight=1)
         
-        # load tree
+        # load tree (will be empty)
         self._load_project_tree()
         
         # Start file system monitoring
@@ -648,6 +647,7 @@ class IceIDE:
         
         # Load config and initialize Groq (after UI elements are created)
         self.load_config()
+        self.auto_detect_interpreters()
         
         # Check if API key is available
         if not self.groq_api_key:
@@ -695,6 +695,28 @@ class IceIDE:
                 json.dump(config, f, indent=4)
         except Exception as e:
             print(f"Error saving config: {e}")
+
+    def auto_detect_interpreters(self):
+        languages = [
+            ('Python', 'python', ['python', 'python3', 'py']),
+            ('JavaScript', 'javascript', ['node', 'nodejs']),
+            ('Java', 'java', ['javac', 'java']),
+            ('C++', 'cpp', ['g++', 'clang++', 'c++']),
+            ('C', 'c', ['gcc', 'clang', 'cc']),
+            ('Rust', 'rust', ['rustc', 'cargo']),
+            ('Go', 'go', ['go']),
+            ('Ruby', 'ruby', ['ruby']),
+            ('PHP', 'php', ['php']),
+            ('Lua', 'lua', ['lua', 'luac'])
+        ]
+        for _, lang_key, common_commands in languages:
+            if lang_key not in self.interpreters or shutil.which(self.interpreters[lang_key]) is None:
+                for cmd in common_commands:
+                    if shutil.which(cmd):
+                        self.interpreters[lang_key] = cmd
+                        break
+        self.save_config()
+        self.update_interpreter_display()
 
     def open_settings(self):
         """Open settings dialog for API key and model"""
@@ -805,13 +827,14 @@ class IceIDE:
             
         try:
             current_files = set()
-            for root_dir, dirs, files in os.walk(self.project_dir):
-                for file in files:
-                    rel_path = os.path.relpath(os.path.join(root_dir, file), self.project_dir)
-                    current_files.add(rel_path)
-                for dir_name in dirs:
-                    rel_path = os.path.relpath(os.path.join(root_dir, dir_name), self.project_dir)
-                    current_files.add(rel_path + os.sep)  # Mark directories with separator
+            if self.project_dir:
+                for root_dir, dirs, files in os.walk(self.project_dir):
+                    for file in files:
+                        rel_path = os.path.relpath(os.path.join(root_dir, file), self.project_dir)
+                        current_files.add(rel_path)
+                    for dir_name in dirs:
+                        rel_path = os.path.relpath(os.path.join(root_dir, dir_name), self.project_dir)
+                        current_files.add(rel_path + os.sep)  # Mark directories with separator
 
             # Check if tree needs updating
             if current_files != self._last_tree_state:
@@ -1003,6 +1026,8 @@ class IceIDE:
         """Load project tree with real-time updates"""
         for item in self.tree.get_children():
             self.tree.delete(item)
+        if not self.project_dir:
+            return
         try:
             self._populate_folder("", self.project_dir)
             # Store current state for monitoring
@@ -1122,6 +1147,7 @@ class IceIDE:
         self.notebook.select(tab_id)
         self._apply_syntax_highlighting_for_widget(ds.text)
         self._load_project_tree()  # Refresh tree to show any new files
+        self.update_interpreter_button()
 
     def _on_text_click(self, event):
         """Handle text click for breakpoint toggling"""
@@ -1154,6 +1180,9 @@ class IceIDE:
         self.debugger.toggle_breakpoint(file_path, line_number)
 
     def new_file_dialog(self):
+        if not self.project_dir:
+            messagebox.showerror("No Folder", "Please open a folder first.")
+            return
         p = filedialog.asksaveasfilename(initialdir=self.project_dir, defaultextension=".gust",
                                          filetypes=[("Gust files", "*.gust"), ("All files", "*.*")])
         if p:
@@ -1162,7 +1191,7 @@ class IceIDE:
             self.open_file_in_tab(p)
 
     def open_file_dialog(self):
-        p = filedialog.askopenfilename(initialdir=self.project_dir, filetypes=[("All files", "*.*")])
+        p = filedialog.askopenfilename(initialdir=self.project_dir or os.path.expanduser("~"), filetypes=[("All files", "*.*")])
         if p:
             self.open_file_in_tab(p)
 
@@ -1213,12 +1242,14 @@ class IceIDE:
         sel = self.notebook.select()
         if not sel:
             self.current_file = None
+            self.update_interpreter_button()
             return
         tab_id = sel
         self.current_file = self.tab_files.get(tab_id, None)
         frame = self.tab_widgets.get(tab_id)
         if frame and hasattr(frame, "_ds"):
             self._apply_syntax_highlighting_for_widget(frame._ds.text)
+        self.update_interpreter_button()
 
     def _apply_syntax_highlighting_for_widget(self, text_widget):
         content = text_widget.get("1.0", tk.END)
@@ -1266,32 +1297,55 @@ class IceIDE:
             text_widget.tag_add("comment", f"1.0+{m.start()}c", f"1.0+{m.end()}c")
 
     def new_folder_dialog(self):
-        folder = filedialog.askdirectory(initialdir=self.project_dir)
+        folder = filedialog.askdirectory(initialdir=os.path.expanduser("~"))
         if not folder:
             return
         self.project_dir = folder
         os.makedirs(self.project_dir, exist_ok=True)
         self._load_project_tree()
         self._reset_terminal()
+        self._check_and_activate_venv()
 
     def open_folder_dialog(self):
-        folder = filedialog.askdirectory()
+        folder = filedialog.askdirectory(initialdir=os.path.expanduser("~"))
         if not folder:
             return
         self.project_dir = folder
         os.makedirs(self.project_dir, exist_ok=True)
         self._load_project_tree()
         self._reset_terminal()
+        self._check_and_activate_venv()
 
     def close_folder(self):
-        if not messagebox.askyesno("Close folder", "Close current folder and return to default?"):
+        if not messagebox.askyesno("Close folder", "Close current folder?"):
             return
         self.current_file = None
-        self.project_dir = os.path.expanduser("~/IceProjects")
-        os.makedirs(self.project_dir, exist_ok=True)
+        self.project_dir = None
+        self.interpreters['python'] = sys.executable  # Reset to system python
+        self.save_config()
         self._load_project_tree()
         self.close_all_tabs()
         self._reset_terminal()
+
+    def _check_and_activate_venv(self):
+        if not self.project_dir:
+            return
+        venv_path = os.path.join(self.project_dir, "venv")
+        if os.path.exists(venv_path):
+            python_bin = 'Scripts' if WINDOWS else 'bin'
+            python_exe = 'python.exe' if WINDOWS else 'python'
+            venv_python = os.path.join(venv_path, python_bin, python_exe)
+            if os.path.exists(venv_python):
+                self.interpreters['python'] = venv_python
+                self.save_config()
+                # Activate in terminal
+                if WINDOWS:
+                    self.terminal.send_command(r'venv\Scripts\activate.bat')
+                else:
+                    self.terminal.send_command('source venv/bin/activate')
+                self.terminal._print("Virtual environment activated.\n")
+            self.update_interpreter_display()
+            self.update_indicator()
 
     def _reset_terminal(self):
         """Reset terminal with the new project directory"""
@@ -1346,6 +1400,9 @@ class IceIDE:
 
     def create_venv(self):
         """Create virtual environment only when explicitly requested"""
+        if not self.project_dir:
+            messagebox.showerror("No Folder", "Please open a folder first.")
+            return
         venv_path = os.path.join(self.project_dir, "venv")
         if os.path.exists(venv_path):
             if messagebox.askyesno("Venv Exists", "Virtual environment already exists. Recreate?"):
@@ -1353,15 +1410,21 @@ class IceIDE:
             else:
                 return
         try:
+            python_exec = self.get_current_interpreter('python')
             # Use check_call wrapper to avoid showing a console on Windows
-            _subprocess_check_call([sys.executable, "-m", "venv", "venv"], cwd=self.project_dir)
+            _subprocess_check_call([python_exec, "-m", "venv", "venv"], cwd=self.project_dir)
             # Set interpreter to venv python
             python_bin = 'Scripts' if WINDOWS else 'bin'
             python_exe = 'python.exe' if WINDOWS else 'python'
             self.interpreters['python'] = os.path.join(venv_path, python_bin, python_exe)
             self.save_config()
+            # Activate the venv in the terminal
+            if WINDOWS:
+                self.terminal.send_command(r'venv\Scripts\activate.bat')
+            else:
+                self.terminal.send_command('source venv/bin/activate')
             self.update_interpreter_display()
-            messagebox.showinfo("Venv Created", "Virtual environment created successfully!")
+            messagebox.showinfo("Venv Created", "Virtual environment created and activated successfully!")
             self._load_project_tree()  # Refresh to show venv folder
         except Exception as e:
             messagebox.showerror("Venv error", str(e))
@@ -1390,6 +1453,13 @@ class IceIDE:
     def get_current_interpreter(self, language):
         """Get the current interpreter for a specific language"""
         interp = self.interpreters.get(language, language)  # Default to command name if not found
+        if language == 'python' and getattr(sys, 'frozen', False) and interp == sys.executable:
+            system_python = shutil.which('python') or shutil.which('python3')
+            if system_python:
+                interp = system_python
+            else:
+                messagebox.showerror("Error", "No system Python interpreter found.")
+                return None
         # Resolve to absolute path if possible
         abs_interp = shutil.which(interp)
         return abs_interp if abs_interp else interp
@@ -1414,7 +1484,7 @@ class IceIDE:
         languages = [
             ('Python', 'python', ['python', 'python3', 'py']),
             ('JavaScript', 'javascript', ['node', 'nodejs']),
-            ('Java', 'java', ['java', 'javac']),
+            ('Java', 'java', ['javac', 'java']),
             ('C++', 'cpp', ['g++', 'clang++', 'c++']),
             ('C', 'c', ['gcc', 'clang', 'cc']),
             ('Rust', 'rust', ['rustc', 'cargo']),
@@ -1514,19 +1584,31 @@ class IceIDE:
 
     def update_interpreter_display(self):
         """Update the interpreter button display"""
-        # Show current Python interpreter as default
-        python_interpreter = self.interpreters.get('python', 'python')
-        interpreter_name = os.path.basename(python_interpreter)
-        self.interpreter_btn.config(text=f"Python: {interpreter_name}")
-        self.update_indicator()
+        self.update_interpreter_button()
+
+    def update_interpreter_button(self):
+        """Update interpreter button based on current file"""
+        if self.current_file:
+            language = self.detect_language_from_file(self.current_file)
+            interpreter = self.get_current_interpreter(language)
+            if interpreter:
+                interp_name = os.path.basename(interpreter)
+                self.interpreter_btn.config(text=f"{language.capitalize()}: {interp_name}")
+            else:
+                self.interpreter_btn.config(text=f"{language.capitalize()}: Not Found")
+        else:
+            self.interpreter_btn.config(text="Interpreter: None")
 
     def update_indicator(self):
         """Update status indicator with current interpreter info"""
         python_interpreter = self.interpreters.get('python', 'python')
         python_name = os.path.basename(python_interpreter)
-        venv_path = os.path.join(self.project_dir, "venv")
+        if self.project_dir:
+            venv_path = os.path.join(self.project_dir, "venv")
+        else:
+            venv_path = ""
         
-        if os.path.exists(venv_path) and "venv" in python_interpreter.lower():
+        if venv_path and os.path.exists(venv_path) and "venv" in python_interpreter.lower():
             indicator = f"venv: {python_name} | Ice 1.0"
         else:
             indicator = f"system: {python_name} | Ice 1.0"
@@ -1693,8 +1775,8 @@ class IceIDE:
         language = self.detect_language_from_file(file_path)
         interpreter = self.get_current_interpreter(language)
 
-        if not interpreter:
-            self.terminal._print(f"Error: Interpreter '{interpreter}' not found.\n")
+        if not interpreter and language not in ['html', 'css']:
+            self.terminal._print(f"Error: Interpreter for {language} not found.\n")
             return
 
         # Check for Gust file
@@ -1758,8 +1840,19 @@ class IceIDE:
             self.terminal.send_command(f'./"{output_name}"')
         elif ext == '.go':
             self.terminal.send_command(f'"{interpreter}" run "{abs_file_path}"')
-        elif ext == '.html':
-            self.terminal._print("HTML file - open in browser manually")
+        elif ext == '.rb':
+            self.terminal.send_command(f'"{interpreter}" "{abs_file_path}"')
+        elif ext == '.php':
+            self.terminal.send_command(f'"{interpreter}" "{abs_file_path}"')
+        elif ext == '.lua':
+            self.terminal.send_command(f'"{interpreter}" "{abs_file_path}"')
+        elif ext in ['.html', '.css']:
+            if os.name == 'nt':
+                self.terminal.send_command(f'start "" "{abs_file_path}"')
+            elif sys.platform == 'darwin':
+                self.terminal.send_command(f'open "{abs_file_path}"')
+            else:
+                self.terminal.send_command(f'xdg-open "{abs_file_path}"')
         else:
             self.terminal._print(f"Unsupported file type: {ext}")
 
