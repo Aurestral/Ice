@@ -308,6 +308,10 @@ class RealTerminal(tk.Frame):
     def start_terminal_process(self):
         """Start a real terminal process"""
         try:
+            encoding = 'utf-8'
+            if os.name == 'nt':
+                oem_cp = ctypes.windll.kernel32.GetOEMCP()
+                encoding = f'cp{oem_cp}'
             if os.name == 'nt':  # Windows
                 # Use wrapper that prevents creating a separate visible console window
                 self.process = _subprocess_popen(
@@ -317,8 +321,9 @@ class RealTerminal(tk.Frame):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    bufsize=1,
-                    universal_newlines=True
+                    encoding=encoding,
+                    errors='replace',
+                    bufsize=1
                 )
             else:  # Linux/Mac
                 self.process = _subprocess_popen(
@@ -328,8 +333,9 @@ class RealTerminal(tk.Frame):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    bufsize=1,
-                    universal_newlines=True
+                    encoding=encoding,
+                    errors='replace',
+                    bufsize=1
                 )
 
             # Start threads to read output
